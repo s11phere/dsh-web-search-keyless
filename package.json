@@ -13,6 +13,14 @@
   "engines": {
     "node": ">=22.5"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/s11phere/dsh-web-search-keyless.git"
+  },
+  "homepage": "https://github.com/s11phere/dsh-web-search-keyless#readme",
+  "bugs": {
+    "url": "https://github.com/s11phere/dsh-web-search-keyless/issues"
+  },
   "files": [
     "lib",
     "cordis.patch.yml",
