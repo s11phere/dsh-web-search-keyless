@@ -40,7 +40,7 @@ dsh plugin --profile web add github:s11phere/dsh-web-search-keyless
 以 `link:` / `github:` 装进 profile 时，Node 按插件的**真实路径**解析裸导入，
 `@deepseek-ai/*` 不在本包的祖先目录链上，因此 `import { WebError } from
 '@deepseek-ai/dsh-web'` 会直接 `ERR_MODULE_NOT_FOUND`（同 dsh-paper-reader 对
-`defineTool` 的处理）。本包因此只依赖 `node:`,与自己的 `./backends.js`：
+`defineTool` 的处理）。本包因此只依赖 `node:` 与自己的 `./backends.js`：
 `lib/host.js` 里带一个形状对齐 seam 契约的本地 `WebError`（`message` + `code` + `cause`）。
 唯一代价是宿主 `dsh-tools` 只对 `instanceof HarnessError` 的错误暴露结构化错误码，
 所以本 provider 的失败以文本形式到达模型 —— 消息里逐条列出了每个引擎的失败原因。
