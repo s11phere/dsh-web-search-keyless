@@ -13,11 +13,14 @@ import {
   bingUrl,
   ddgUrl,
   decodeEntities,
+  filterRelevant,
   normalizeText,
   parseBingRss,
   parseDdgLite,
+  queryTerms,
   runBing,
   runDdg,
+  strongTerms,
   unwrapDdgHref,
 } from '../lib/backends.js'
 
@@ -94,6 +97,66 @@ test('url builders encode the query', () => {
   assert.match(bingUrl('a b & c', 5), /format=rss/)
   assert.match(bingUrl('a b & c', 5), /count=5/)
   assert.match(ddgUrl('a b'), /q=a\+b/)
+})
+
+test('queryTerms drops stopwords and keeps CJK bigrams', () => {
+  assert.deepEqual(queryTerms('How to use the PyMuPDF latest version'), ['pymupdf', 'latest', 'version'])
+  assert.deepEqual(queryTerms('图表标题抽取'), ['图表', '表标', '标题', '题抽', '抽取'])
+  assert.deepEqual(queryTerms('图 表 标题 抽取'), ['图', '表', '标题', '抽取'])
+  assert.deepEqual(queryTerms('the of and'), [])
+  assert.deepEqual(queryTerms('   '), [])
+})
+
+test('strongTerms drops domain-generic vocabulary, falling back when nothing is left', () => {
+  // "research"/"papers"/"caption" cannot serve as evidence for this query…
+  assert.deepEqual(strongTerms('FigureSeer parsing result-figures research papers ECCV 2016 caption legend'), [
+    'figureseer',
+    'parsing',
+    'result-figures',
+    'result',
+    'eccv',
+    '2016',
+    'legend',
+  ])
+  // …but a query made only of generic words still gets judged on them.
+  assert.deepEqual(strongTerms('pdf caption extraction'), ['pdf', 'caption', 'extraction'])
+})
+
+test('filterRelevant rejects a silently degraded result set', () => {
+  // The exact failure observed from Bing RSS for a long-tail paper-title query.
+  const junk = [
+    { url: 'https://www.pcmag.com/picks/best-music-streaming', title: 'The Best Online Music Streaming Services for 2026', snippet: 'Our experts tested the top services.' },
+    { url: 'https://support.bissell.com/app/products/detail/p/67399', title: 'ProHeat Essential Upright Carpet Cleaner', snippet: 'Product support.' },
+    { url: 'https://www.yale.edu/', title: 'Yale University', snippet: 'A research university.' },
+  ]
+  const judged = filterRelevant(junk, 'FigureSeer parsing result-figures research papers ECCV 2016 caption legend')
+  assert.equal(judged.sources.length, 0)
+  assert.equal(judged.dropped, 3)
+})
+
+test('filterRelevant keeps a short legitimate query matched by one distinctive term', () => {
+  const good = [
+    { url: 'https://pypi.org/project/pymupdf/', title: 'pymupdf · PyPI', snippet: 'PyMuPDF is a high-performance Python library.' },
+    { url: 'https://example.com/unrelated', title: 'Cooking with cast iron', snippet: 'A recipe blog.' },
+  ]
+  const judged = filterRelevant(good, 'PyMuPDF latest version')
+  assert.equal(judged.sources.length, 1)
+  assert.match(judged.sources[0].url, /pypi\.org/)
+  assert.equal(judged.dropped, 1)
+})
+
+test('filterRelevant requires two terms when neither is distinctive', () => {
+  // "fid" and "score" are short and generic; a page matching only one is not evidence.
+  const sources = [
+    { url: 'https://example.com/a', title: 'FID explained', snippet: 'A metric.' },
+    { url: 'https://example.com/b', title: 'FID score explained', snippet: 'A metric.' },
+  ]
+  assert.equal(filterRelevant(sources, 'fid score').sources.length, 1)
+})
+
+test('filterRelevant is disabled for a query with no judgeable terms', () => {
+  const sources = [{ url: 'https://example.com/x', title: 'x' }]
+  assert.equal(filterRelevant(sources, 'the of and').sources.length, 1)
 })
 
 test('live: real endpoints answer with sources', { skip: process.env.DSH_KEYLESS_LIVE !== '1' }, async () => {

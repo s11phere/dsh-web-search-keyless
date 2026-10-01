@@ -1,5 +1,7 @@
 /**
- * Host-plugin tests: registration through a stub context, plus the fallback/error paths.
+ * Host-plugin tests: registration through a stub context, the degraded-response guard,
+ * pacing/cooldown behaviour, and the fallback/error paths. The offline cases stub
+ * `globalThis.fetch`, so they assert on the provider's decisions rather than the network.
  * The live section (env-gated) proves the registered provider really answers a query.
  */
 
@@ -21,6 +23,20 @@ function capture(config) {
   }
   apply(ctx, config)
   return provider
+}
+
+/** Run `body` with `globalThis.fetch` replaced, restoring it afterwards. */
+async function withFetch(t, impl) {
+  const original = globalThis.fetch
+  globalThis.fetch = impl
+  t.after(() => {
+    globalThis.fetch = original
+  })
+}
+
+/** A one-item Bing RSS document. */
+function rss(title, link, description = '') {
+  return `<?xml version="1.0"?><rss version="2.0"><channel><title>Bing</title><item><title>${title}</title><link>${link}</link><description>${description}</description></item></channel></rss>`
 }
 
 test('declares the web injection and a stable plugin name', () => {
@@ -52,14 +68,89 @@ test('an unknown engine is reported without aborting the configured order', asyn
   )
 })
 
+test('keeps a relevant result set', async (t) => {
+  await withFetch(t, async () =>
+    new Response(rss('pymupdf &middot; PyPI', 'https://pypi.org/project/pymupdf/', 'PyMuPDF is a Python PDF library.'), {
+      status: 200,
+    }),
+  )
+  const provider = capture({ engines: ['bing'], minIntervalMs: 0 })
+  const result = await provider.search({ query: 'PyMuPDF latest version', maxResults: 5 })
+  assert.equal(result.sources.length, 1)
+  assert.equal(result.sources[0].url, 'https://pypi.org/project/pymupdf/')
+  assert.equal(result.truncated, false)
+})
+
+test('a silently degraded engine response fails loudly instead of forwarding garbage', async (t) => {
+  // Exactly the observed Bing degradation: HTTP 200, a well-formed feed, unrelated items.
+  await withFetch(t, async () =>
+    new Response(
+      `<?xml version="1.0"?><rss version="2.0"><channel><title>Bing: FigureSeer parsing result-figures research papers ECCV 2016 caption legend</title>
+       <item><title>The Best Online Music Streaming Services for 2026 - PCMag</title><link>https://www.pcmag.com/picks/best-music-streaming</link><description>Our experts tested the top music services.</description></item>
+       <item><title>ProHeat Essential Upright Carpet Cleaner</title><link>https://support.bissell.com/app/products/detail/p/67399</link><description>Product support.</description></item>
+       </channel></rss>`,
+      { status: 200 },
+    ),
+  )
+  const provider = capture({ engines: ['bing'], minIntervalMs: 0 })
+  await assert.rejects(
+    provider.search({ query: 'FigureSeer parsing result-figures research papers ECCV 2016 caption legend' }),
+    (error) =>
+      error.code === 'WEB_PROVIDER_ERROR' && /2 result\(s\) but none matched the query/.test(error.message),
+  )
+})
+
+test('a degraded primary falls through to the next engine', async (t) => {
+  let call = 0
+  await withFetch(t, async () => {
+    call += 1
+    // bing → unrelated junk; ddg → a relevant hit for the same query.
+    return call === 1
+      ? new Response(
+          `<?xml version="1.0"?><rss version="2.0"><channel><title>Bing</title><item><title>Best Music Streaming</title><link>https://www.pcmag.com/picks/best-music-streaming</link><description>music</description></item></channel></rss>`,
+          { status: 200 },
+        )
+      : new Response(
+          `<html><body><a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdl.acm.org%2Fdoi%2F10.1145%2F2910896.2910904" class='result-link'>PDFFigures 2.0 | Proceedings of the ACM</a><td class='result-snippet'>Mining figures from research papers.</td></body></html>`,
+          { status: 200 },
+        )
+  })
+  const provider = capture({ engines: ['bing', 'ddg'], minIntervalMs: 0 })
+  const result = await provider.search({ query: 'PDFFigures 2.0 mining figures' })
+  assert.equal(result.sources.length, 1)
+  assert.match(result.sources[0].url, /dl\.acm\.org/)
+})
+
+test('a 403 puts the engine on cooldown so later queries fail fast', async (t) => {
+  let calls = 0
+  await withFetch(t, async () => {
+    calls += 1
+    return new Response('', { status: 403 })
+  })
+  const provider = capture({ engines: ['bing'], minIntervalMs: 0, cooldownMs: 60_000 })
+  await assert.rejects(provider.search({ query: 'some long tail query' }), /HTTP 403/)
+  await assert.rejects(provider.search({ query: 'another long tail query' }), /cooldown/)
+  assert.equal(calls, 1, 'the second search must not touch the network while cooling down')
+})
+
+test('requests to one engine are paced, not bursted', async (t) => {
+  await withFetch(t, async () =>
+    new Response(rss('pymupdf · PyPI', 'https://pypi.org/project/pymupdf/', 'PyMuPDF docs'), { status: 200 }),
+  )
+  const provider = capture({ engines: ['bing'], minIntervalMs: 150 })
+  const started = Date.now()
+  await Promise.all([
+    provider.search({ query: 'PyMuPDF latest version' }),
+    provider.search({ query: 'PyMuPDF documentation' }),
+  ])
+  assert.ok(Date.now() - started >= 150, 'two back-to-back searches must be spaced by minIntervalMs')
+})
+
 test('live: the registered provider returns sources', { skip: process.env.DSH_KEYLESS_LIVE !== '1' }, async () => {
-  const provider = capture({})
+  const provider = capture({ engines: ['bing'] })
   const result = await provider.search({ query: 'PyMuPDF latest version', maxResults: 5 })
   assert.equal(result.truncated, false)
   assert.ok(result.sources.length > 0)
   assert.ok(result.sources.length <= 5)
   assert.match(result.sources[0].url, /^https?:\/\//)
-
-  const viaDdg = capture({ engines: ['ddg'] })
-  assert.ok((await viaDdg.search({ query: 'PyMuPDF latest version', maxResults: 3 })).sources.length > 0)
 })

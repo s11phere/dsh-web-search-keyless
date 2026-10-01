@@ -64,10 +64,13 @@ profile 自己的 `cordis.patch.yml` 在 bundle 之后应用，随时可以覆�
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `id` | `keyless` | 注册到 seam 的 provider id，供 `web.searchProvider` 引用 |
-| `engines` | `['bing','ddg']` | 引擎尝试顺序；前一个抛错或返回零条才换下一个 |
+| `engines` | `['bing','ddg']` | 引擎尝试顺序；前一个抛错、返回零条或结果全部无关才换下一个 |
 | `timeoutMs` | `15000` | 单个引擎的超时 |
 | `userAgent` | 桌面 Chrome UA | Bing/DDG 对空 UA 会返回空结果集，别清空 |
-| `debug` | `false` | 打印每次命中的引擎与条数 |
+| `relevanceGuard` | `true` | 丢掉与 query 无关的结果；关掉就退回"静默转发降级结果"，只建议排查解析问题时临时用 |
+| `minIntervalMs` | `800` | 同一引擎两次请求的最小间隔（并行 query 会排队） |
+| `cooldownMs` | `300000` | 引擎遇到 403/429/传输失败后的冷却时长 |
+| `debug` | `false` | 打印命中的引擎、丢弃条数与冷却事件 |
 
 ```yaml
 - id: dsh-web-search-keyless
@@ -75,12 +78,49 @@ profile 自己的 `cordis.patch.yml` 在 bundle 之后应用，随时可以覆�
   config:
     engines: ['bing']
     timeoutMs: 10000
+    minIntervalMs: 1500
     debug: true
 ```
 
 `request.maxResults` 会作为 `count` 传给 Bing；截断本身由 seam 负责，provider 一律
 返回 `truncated: false`。全部引擎失败才抛 `WebError('WEB_PROVIDER_ERROR')`，错误文本里
-带每个引擎的失败原因（超时 / HTTP 状态 / 零结果 / 未知引擎）。
+带每个引擎的失败原因（超时 / HTTP 状态 / 零结果 / 未知引擎 / 结果无关 / 冷却中）。
+
+## 效果与付费路径的差异（实测）
+
+**这不是付费搜索的等价替代。** 差异分三层，都有实测支撑：
+
+1. **元数据反而更全**。付费路径（DeepSeek 原生搜索）经本仓库实测的 200 条结果里
+   **0 条带摘要、0 条带日期**（`web_search_result` 的 snippet 来自引用片段
+   `cited_text`，实际很少命中），模型只拿到标题 + URL。本插件每条都带标题、摘要、
+   发布日期，模型据此更容易判断该不该 `web_fetch`。
+
+2. **长尾查询会静默降级**。Bing 对冷门查询会返回 HTTP 200、channel 标题正确回显
+   query，然后给出**完全无关**的热门内容。实测（真实查询，节流 9s/次）：
+
+   | query | 结果 |
+   |---|---|
+   | `PyMuPDF latest version` | 6 条，全部相关 |
+   | `docling picture caption matching nearest caption below layout model` | 8 条，全部相关 |
+   | `Nougat OCR arXiv PDF math LaTeX formula accuracy` | 8 条，全部相关 |
+   | `PDFFigures 2.0 mining figures from research papers…` | 失败（Bing 返回 8 条无关内容） |
+   | `FigureSeer parsing result-figures research papers ECCV 2016…` | 失败（同上） |
+   | `CERMINE figure caption zone classification SVM…` | 失败（同上） |
+
+   同一批 query 走付费路径时，返回的是 dl.acm / Springer 论文页、`github.com/CeON/CERMINE`
+   源码、`docs.rs` 文档这一级的深链——**冷门方法名、论文标题这类调研，付费路径明显更强**。
+   所以 `relevanceGuard` 默认开着：与其让模型自信引用垃圾，不如让这次搜索**明确失败**。
+
+3. **降级是客户端信誉问题，不是查询语义**。同一时刻直接抓 Bing 的 HTML 结果页
+   （`/search?q=…`，不走 RSS）返回的同样是无关内容（实测给出 "Assistant Principal jobs
+   in Georgia"），说明两个接口都在被反爬降级。短时间高频请求会显著加剧：一次约 170
+   个请求的压测之后，DDG 从可用变成 403、再变成连接超时，Bing 的长尾查询全面降级。
+   因此本插件默认串行 + 最小间隔 + 冷却，且失败后**不回落到付费路径**。
+
+**结论**：命名实体、常见库/项目类查询，免费路径够用且更快；冷门方法名、论文标题、
+细分算法调研，建议要么接一个为程序化调用设计的检索 API（Tavily / Brave / Exa /
+Perplexity——本插件的 provider 接口与之同形，改 `backends.js` 即可），要么在 profile 里
+把 `web.searchProvider` 临时切回 `deepseek-official`。
 
 ## 已知取舍
 
@@ -89,12 +129,11 @@ profile 自己的 `cordis.patch.yml` 在 bundle 之后应用，随时可以覆�
 - **可用性**：两个引擎都是公开页面，可能被限流或改版。任一失败会顺延到下一个，
   两个都失败就是一次工具错误——不再回落到付费路径，这是有意的。
 - **条款**：Bing RSS 的版权声明限定 "personal, non-commercial use within an RSS
-  aggregator"。多租户或商用请换成有正式 API 的检索后端（Tavily / Brave / Exa /
-  Perplexity），本插件的 provider 接口与之同形，改 `backends.js` 即可。
+  aggregator"。多租户或商用请换成有正式 API 的检索后端，见上一节。
 
 ## 测试
 
 ```bash
-node --test                    # 纯离线：解析器 + 错误路径 + 注册
-DSH_KEYLESS_LIVE=1 node --test # 额外打真实端点，验证两个引擎都出结果
+node --test                    # 纯离线：解析器 + 相关度闸门 + 节流/冷却 + 注册
+DSH_KEYLESS_LIVE=1 node --test # 额外打真实端点，验证引擎出结果
 ```
