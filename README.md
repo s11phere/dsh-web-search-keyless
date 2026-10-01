@@ -23,25 +23,27 @@ DDG 的 href 是 `//duckduckgo.com/l/?uddg=<encoded>` 形式的跳转壳，`unwr
 ## 安装
 
 ```bash
-# 1) 放进插件仓库（或任意目录）
-cp -a dsh-web-search-keyless /mnt/f/project/tools/plugin/
-
-# 2) 装进 profile：自动创建 node_modules 链接并追加 dsh.profile.bundles
-dsh plugin --profile web add /mnt/f/project/tools/plugin/dsh-web-search-keyless
-
-# 3) 重启 dsh web（新增 bundle 不进热更新），刷新页面
+dsh plugin --profile web add github:s11phere/dsh-web-search-keyless
 ```
 
-`node_modules/@deepseek-ai/dsh-web` 必须指向 DSH 安装目录里的同名包，插件才能拿到
-`WebError`（错误码要能被 seam 识别）。这一步在开发目录里已经建好，`cp -a` 会原样带走；
-如果换了 DSH 安装路径，重建即可：
+装完**重启 `dsh web`**（新增 bundle 不进热更新），刷新页面。卸载把 `add` 换成 `remove`，
+同样要重启。
 
-```bash
-cd <本包目录>
-mkdir -p node_modules/@deepseek-ai
-ln -sfn "$(dirname "$(readlink -f "$(command -v dsh)")")/../lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web" \
-  node_modules/@deepseek-ai/dsh-web
-```
+> 别用 scp 风格的 `git@github.com:...` —— pnpm 会把它误解析成「包名 `git` + 版本」，
+> 装出一个叫 `git` 的空依赖，插件不会生效。用上面的 `github:<owner>/<repo>` 写法。
+>
+> 也可以 `dsh plugin --profile web add <本地目录>`，但本包**不依赖任何 `@deepseek-ai/*`
+> 裸导入**（见下），所以跨盘、跨 profile 都不会出链接问题。
+
+### 为什么没有任何 `@deepseek-ai/*` 导入
+
+以 `link:` / `github:` 装进 profile 时，Node 按插件的**真实路径**解析裸导入，
+`@deepseek-ai/*` 不在本包的祖先目录链上，因此 `import { WebError } from
+'@deepseek-ai/dsh-web'` 会直接 `ERR_MODULE_NOT_FOUND`（同 dsh-paper-reader 对
+`defineTool` 的处理）。本包因此只依赖 `node:`,与自己的 `./backends.js`：
+`lib/host.js` 里带一个形状对齐 seam 契约的本地 `WebError`（`message` + `code` + `cause`）。
+唯一代价是宿主 `dsh-tools` 只对 `instanceof HarnessError` 的错误暴露结构化错误码，
+所以本 provider 的失败以文本形式到达模型 —— 消息里逐条列出了每个引擎的失败原因。
 
 ## 生效方式
 
