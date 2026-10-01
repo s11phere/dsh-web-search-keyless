@@ -1,0 +1,31 @@
+# dsh-web-search-keyless bundle patch.
+#
+# 两件事：
+#   1. 声明宿主侧 loader 入口。`insert:` 行随包发布，因此
+#      `dsh plugin --profile web add <本包>` 会自动把它追加进该 profile 的
+#      `dsh.profile.bundles`，不需要再手写同 id 的 `- insert:`。
+#   2. 把 web seam 的 searchProvider 指到本 provider。
+#
+# 为什么第 2 条放在这里而不是让用户改 profile：这样安装是**原子**的。若只把
+# `searchProvider: keyless` 写进 profile 的 cordis.patch.yml，而该 profile 开了
+# `patchReload: live`，那么保存的瞬间运行中的宿主就会去解析一个尚未注册的
+# provider（插件要重启才装载），web_search 会在重启前一直报
+# WEB_PROVIDER_CONFIGURED_MISSING。放进随包发布的 patch 里，生效时刻就与插件
+# 装载时刻一致：要么都还没有，要么都到位。
+#
+# profile 自己的 cordis.patch.yml 在本层之后应用，因此随时可以在那里覆盖回去：
+#
+#   - id: web
+#     name: '@deepseek-ai/dsh-web'
+#     config:
+#       searchProvider: deepseek-official   # 换回 DeepSeek 官方搜索
+
+- insert:
+    - id: dsh-web-search-keyless
+      name: 'dsh-web-search-keyless'
+
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: keyless
+    fetchProvider: http

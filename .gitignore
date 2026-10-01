@@ -1,0 +1,53 @@
+# 依赖与安装产物
+node_modules/
+.pnpm-store/
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# dsh 在 profile 里安装本包时产生的本地链接/缓存
+.dsh/
+*.tsbuildinfo
+
+# 日志与本地运行产物
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+
+# 测试与覆盖率
+coverage/
+.nyc_output/
+*.lcov
+
+# 编辑器与 IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# 本地调试草稿
+.probe/
+scratch/
+tmp/
+*.local.md
+*.local.json
+
+# 敏感凭据：任何情况下都不提交
+.env
+.env.*
+*.pem
+*.key
+credentials*.yaml
+credentials*.yml
