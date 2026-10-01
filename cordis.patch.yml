@@ -23,6 +23,10 @@
 - insert:
     - id: dsh-web-search-keyless
       name: 'dsh-web-search-keyless'
+      # 免费引擎全部失败后回落到 DSH 自带的 DeepSeek 原生搜索。显式写出来是为了让
+      # "只有冷门查询才花钱"在配置里可见；置空字符串即可退回纯免费行为。
+      config:
+        fallbackProvider: deepseek-official
 
 - id: web
   name: '@deepseek-ai/dsh-web'

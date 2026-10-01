@@ -146,6 +146,107 @@ test('requests to one engine are paced, not bursted', async (t) => {
   assert.ok(Date.now() - started >= 150, 'two back-to-back searches must be spaced by minIntervalMs')
 })
 
+/**
+ * Run `apply` against a stub ctx whose seam registry already holds `fallback`.
+ *
+ * The real seam exposes its registry as a plain `Map` at runtime (private in the types),
+ * which is exactly what the provider reads for its paid fallback.
+ */
+function captureWithRegistry(config, fallback) {
+  let provider
+  const registry = new Map()
+  if (fallback !== undefined) registry.set(fallback.id, fallback)
+  const ctx = {
+    web: {
+      searchProviders: registry,
+      registerSearchProvider(candidate) {
+        provider = candidate
+        return () => {}
+      },
+    },
+  }
+  apply(ctx, config)
+  return provider
+}
+
+/** A stand-in for the registered `deepseek-official` provider. */
+function fakeFallback(outcome) {
+  const queries = []
+  return {
+    id: 'deepseek-official',
+    queries,
+    available: () => true,
+    async search(request) {
+      queries.push(request.query)
+      if (outcome instanceof Error) throw outcome
+      return outcome
+    },
+  }
+}
+
+/** A Bing response that carries valid XML but unrelated content. */
+function junkRss() {
+  return `<?xml version="1.0"?><rss version="2.0"><channel><title>Bing: tampered</title><item><title>Free Porn Videos</title><link>https://example.com/junk</link><description>unrelated</description></item></channel></rss>`
+}
+
+test('falls back to the paid provider after every keyless engine fails', async (t) => {
+  await withFetch(t, async () => new Response(junkRss(), { status: 200 }))
+  const fallback = fakeFallback({ sources: [{ url: 'https://dl.acm.org/doi/10.1145/2910896.2910904' }], truncated: false })
+  const provider = captureWithRegistry({ engines: ['bing', 'ddg'], minIntervalMs: 0 }, fallback)
+  const result = await provider.search({ query: 'FigureSeer parsing result-figures research papers' })
+  assert.equal(result.sources.length, 1)
+  assert.match(result.sources[0].url, /dl\.acm\.org/)
+  assert.deepEqual(fallback.queries, ['FigureSeer parsing result-figures research papers'])
+})
+
+test('does not consult the paid fallback when a keyless engine succeeds', async (t) => {
+  await withFetch(t, async () =>
+    new Response(rss('pymupdf · PyPI', 'https://pypi.org/project/pymupdf/', 'PyMuPDF docs'), { status: 200 }),
+  )
+  const fallback = fakeFallback({ sources: [{ url: 'https://paid.example/' }], truncated: false })
+  const provider = captureWithRegistry({ engines: ['bing'], minIntervalMs: 0 }, fallback)
+  await provider.search({ query: 'PyMuPDF latest version' })
+  assert.deepEqual(fallback.queries, [], 'the paid provider must stay untouched when the free path works')
+})
+
+test('passes a fallback result through unfiltered', async (t) => {
+  await withFetch(t, async () => new Response(junkRss(), { status: 200 }))
+  // Deliberately shares no term with the query, mirroring DeepSeek's snippet-less results.
+  const fallback = fakeFallback({ sources: [{ url: 'https://dl.acm.org/doi/x', title: 'Proceedings' }], truncated: false })
+  const provider = captureWithRegistry({ engines: ['bing'], minIntervalMs: 0 }, fallback)
+  const result = await provider.search({ query: 'FigureSeer parsing result-figures' })
+  assert.equal(result.sources.length, 1)
+})
+
+test('reports both the keyless and the fallback failure', async (t) => {
+  await withFetch(t, async () => new Response(junkRss(), { status: 200 }))
+  const fallback = fakeFallback(new Error('WEB_PROVIDER_CREDENTIAL_MISSING'))
+  const provider = captureWithRegistry({ engines: ['bing'], minIntervalMs: 0 }, fallback)
+  await assert.rejects(
+    provider.search({ query: 'FigureSeer parsing result-figures' }),
+    (error) =>
+      /anti-bot degradation/.test(error.message) && /fallback deepseek-official: WEB_PROVIDER_CREDENTIAL_MISSING/.test(error.message),
+  )
+})
+
+test('never falls back to itself, and tolerates an empty registry', async (t) => {
+  await withFetch(t, async () => new Response(junkRss(), { status: 200 }))
+  const self = captureWithRegistry({ engines: ['bing'], minIntervalMs: 0, fallbackProvider: 'keyless' })
+  await assert.rejects(self.search({ query: 'FigureSeer parsing result-figures' }), (error) =>
+    /anti-bot degradation/.test(error.message) && !/fallback/.test(error.message),
+  )
+  const noRegistry = capture({ engines: ['bing'], minIntervalMs: 0 })
+  await assert.rejects(noRegistry.search({ query: 'FigureSeer parsing result-figures' }), /anti-bot degradation/)
+})
+
+test('an empty fallbackProvider disables the fallback', async (t) => {
+  await withFetch(t, async () => new Response(junkRss(), { status: 200 }))
+  const fallback = fakeFallback({ sources: [{ url: 'https://paid.example/' }], truncated: false })
+  const provider = captureWithRegistry({ engines: ['bing'], minIntervalMs: 0, fallbackProvider: '' }, fallback)
+  await assert.rejects(provider.search({ query: 'FigureSeer parsing result-figures' }), /anti-bot degradation/)
+  assert.deepEqual(fallback.queries, [])
+})
+
 test('live: the registered provider returns sources', { skip: process.env.DSH_KEYLESS_LIVE !== '1' }, async () => {
   const provider = capture({ engines: ['bing'] })
   const result = await provider.search({ query: 'PyMuPDF latest version', maxResults: 5 })

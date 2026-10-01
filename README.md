@@ -68,9 +68,10 @@ profile 自己的 `cordis.patch.yml` 在 bundle 之后应用，随时可以覆�
 | `timeoutMs` | `15000` | 单个引擎的超时 |
 | `userAgent` | 桌面 Chrome UA | Bing/DDG 对空 UA 会返回空结果集，别清空 |
 | `relevanceGuard` | `true` | 丢掉与 query 无关的结果；关掉就退回"静默转发降级结果"，只建议排查解析问题时临时用 |
+| `fallbackProvider` | `deepseek-official` | 免费引擎全部失败后改用的已注册 provider；空字符串关闭回退 |
 | `minIntervalMs` | `800` | 同一引擎两次请求的最小间隔（并行 query 会排队） |
 | `cooldownMs` | `300000` | 引擎遇到 403/429/传输失败后的冷却时长 |
-| `debug` | `false` | 打印命中的引擎、丢弃条数与冷却事件 |
+| `debug` | `false` | 打印命中的引擎、丢弃条数与冷却/回退事件 |
 
 ```yaml
 - id: dsh-web-search-keyless
@@ -85,6 +86,29 @@ profile 自己的 `cordis.patch.yml` 在 bundle 之后应用，随时可以覆�
 `request.maxResults` 会作为 `count` 传给 Bing；截断本身由 seam 负责，provider 一律
 返回 `truncated: false`。全部引擎失败才抛 `WebError('WEB_PROVIDER_ERROR')`，错误文本里
 带每个引擎的失败原因（超时 / HTTP 状态 / 零结果 / 未知引擎 / 结果无关 / 冷却中）。
+
+## 免费优先、失败才付费的回退
+
+免费引擎**全部失败**（连接失败 / 403 / 零结果 / 结果全被判为无关 / 冷却中）之后，
+provider 会调用 `fallbackProvider` 指定的另一个已注册 provider —— 默认就是 DSH 自带的
+`deepseek-official`。所以正常的常见查询依然零成本，只有冷门调研才会花钱，而且花的那次
+会照常写 `web/deepseek-search-llm-request` 审计事件。
+
+三个设计决定：
+
+- **复用注册表，不抄实现**。回退是直接调用 `ctx.web` 里已注册的那个 provider，而不是
+  把"Anthropic Messages + 原生 `web_search`"再实现一遍：密钥解析、错误语义、审计事件
+  都只有一份，不会漂移。代价是 `searchProviders` 在 `dsh-web` 的类型里是 private
+  （运行时是个普通 Map），因此代码里一律按"拿不到就不回退"处理 —— DSH 改了内部结构，
+  本插件只是退回纯免费行为，不会抛错。
+- **回退结果不过相关度闸门**。付费路径的服务器端检索本身做了相关度，而且它实测不带
+  snippet，用为免费引擎设计的规则去判它只会误杀。
+- **失败仍然是一次失败**。连回退也失败时，抛出的错误里同时列出免费引擎和回退的失败
+  原因，不会静默降级成空结果。
+
+代价是延迟：最坏情况是 Bing 超时 + DDG 超时之后才轮到付费搜索。工具侧
+`tool-web.searchTimeoutMs` 默认 60s，通常够用；要提高回退命中率可以调小
+`timeoutMs`（引擎失败得越快，越早进入付费路径）。
 
 ## 效果与付费路径的差异（实测）
 
